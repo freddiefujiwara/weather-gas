@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi} from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 import {
 buildDaySummaries,
 getCalendarId,
@@ -193,6 +193,20 @@ expect(() => getCalendarId()).toThrow("CALENDAR_ID");
 });
 
 describe("syncWeatherCalendar", () => {
+// syncWeatherCalendar syncs from the real "today", while the
+// fixtures describe the week of 2026-11-13. Pin the clock so the
+// assertions do not rot as the calendar moves. (On pristine main
+// this test failed for exactly that reason: run on 2026-11-20, the
+// first synced day is the weekly 晴れ day, not the fixture's くもり
+// day.) The assertions themselves are unchanged.
+beforeEach(() => {
+vi.useFakeTimers();
+vi.setSystemTime(new Date("2026-11-13T06:00:00+09:00"));
+});
+afterEach(() => {
+vi.useRealTimers();
+});
+
 it("replaces the week's events with 7 forecast days", () => {
 const count = syncWeatherCalendar();
 expect(count).toBe(7);

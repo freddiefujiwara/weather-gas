@@ -119,8 +119,12 @@ const WEATHER_CODE_TABLE = {
 };
 
 export const weatherCodeInfo = (code) => {
-const key = String(code || '');
-if (WEATHER_CODE_TABLE[key]) {
+// Only scalars can name a code; anything else (arrays, objects,
+// values String() cannot convert) reads as "no code".
+const key = typeof code === 'string' || typeof code === 'number'? String(code): '';
+// Own-property lookup only: a plain lookup would resolve keys like
+// "toString" through Object.prototype and destructure a function.
+if (Object.hasOwn(WEATHER_CODE_TABLE, key)) {
 const [icon, label] = WEATHER_CODE_TABLE[key];
 return { icon, label};
 }
@@ -134,7 +138,7 @@ return { icon: '🌡️', label: '天気'};
 
 // Open-Meteo (WMO) weather codes, used only when JMA has no code for a day.
 const omCodeInfo = (code) => {
-const c = Number(code);
+const c = toNum(code);
 if (c === 0) return { icon: '☀️', label: '快晴'};
 if (c === 1 || c === 2) return { icon: '🌤️', label: '晴れ'};
 if (c === 3) return { icon: '☁️', label: 'くもり'};
@@ -146,13 +150,32 @@ if (c >= 95) return { icon: '⛈️', label: '雷雨'};
 return { icon: '🌡️', label: '天気'};
 };
 
-const normalizeText = (text) =>
-String(text || '').replace(/　/g, ' ').replace(/\s+/g, ' ').trim();
+// Text from the APIs: strings pass through and scalars keep their
+// String() rendering, but anything else (arrays, objects, values
+// String() cannot convert) reads as empty instead of leaking a
+// comma-joined or "[object Object]" rendering into the calendar.
+const normalizeText = (text) => {
+const s =
+typeof text === 'string'
+? text
+: typeof text === 'number' || typeof text === 'boolean'
+? String(text || '')
+: '';
+return s.replace(/　/g, ' ').replace(/\s+/g, ' ').trim();
+};
 
+// Only finite numbers and non-blank numeric strings carry a
+// measurement. Bare Number() would invent values (true -> 1,
+// [65] -> 65, [] -> 0, " " -> 0) and let Infinity (which JSON.parse
+// produces from e.g. 1e999) flow into the formatted output; all of
+// those read as "no data" here.
 const toNum = (v) => {
-if (v === null || v === undefined || v === '') return null;
+if (typeof v === 'number') return Number.isFinite(v)? v: null;
+if (typeof v === 'string' && v.trim()!== '') {
 const n = Number(v);
-return Number.isNaN(n)? null: n;
+return Number.isFinite(n)? n: null;
+}
+return null;
 };
 
 const roundOrNull = (v) => {
@@ -175,9 +198,12 @@ const parseShortWeather = (report) => {
 const map = new Map();
 const ts = (report.timeSeries || [])[0];
 if (!ts) return map;
-const area = (ts.areas || []).find((a) => a.area.code === JMA_AREA_CODE);
+const areas = Array.isArray(ts.areas)? ts.areas: [];
+const area = areas.find((a) => a && a.area && a.area.code === JMA_AREA_CODE);
 if (!area) return map;
+if (!Array.isArray(ts.timeDefines)) return map;
 ts.timeDefines.forEach((td, i) => {
+if (typeof td!== 'string') return;
 map.set(td.slice(0, 10), {
 code: area.weatherCodes? area.weatherCodes[i]: null,
 text: area.weathers? normalizeText(area.weathers[i]): '',
@@ -196,8 +222,12 @@ const map = new Map();
 // series whose matching area actually carries pops.
 let ts = null;
 let area = null;
-for (const candidate of report.timeSeries || []) {
-const found = (candidate.areas || []).find((a) => a.area && a.area.code === JMA_AREA_CODE);
+const series = Array.isArray(report.timeSeries)? report.timeSeries: [];
+for (const candidate of series) {
+if (!candidate) continue;
+const found = (Array.isArray(candidate.areas)? candidate.areas: []).find(
+(a) => a && a.area && a.area.code === JMA_AREA_CODE
+);
 if (found && found.pops) {
 ts = candidate;
 area = found;
@@ -205,9 +235,12 @@ break;
 }
 }
 if (!ts || !area) return map;
+if (!Array.isArray(ts.timeDefines)) return map;
 const labelByEndHour = { '06': '0〜6時', '12': '6〜12時', '18': '12〜18時', '00': '18〜24時'};
 ts.timeDefines.forEach((td, i) => {
+if (typeof td!== 'string') return;
 const endMs = new Date(td).getTime();
+if (Number.isNaN(endMs)) return;
 const startKey = dateKeyFromMs(endMs - 6 * 60 * 60 * 1000);
 const label = labelByEndHour[td.slice(11, 13)] || '';
 const pop = toNum(area.pops[i]);
@@ -223,9 +256,10 @@ const parseWeekly = (report) => {
 const weather = new Map();
 const temps = new Map();
 const ts0 = (report.timeSeries || [])[0];
-if (ts0 && ts0.areas && ts0.areas[0]) {
+if (ts0 && ts0.areas && ts0.areas[0] && Array.isArray(ts0.timeDefines)) {
 const area = ts0.areas[0];
 ts0.timeDefines.forEach((td, i) => {
+if (typeof td!== 'string') return;
 weather.set(td.slice(0, 10), {
 code: area.weatherCodes? area.weatherCodes[i]: null,
 pop: area.pops? toNum(area.pops[i]): null,
@@ -234,9 +268,10 @@ reliability: area.reliabilities? area.reliabilities[i] || '': '',
 });
 }
 const ts1 = (report.timeSeries || [])[1];
-if (ts1 && ts1.areas && ts1.areas[0]) {
+if (ts1 && ts1.areas && ts1.areas[0] && Array.isArray(ts1.timeDefines)) {
 const area = ts1.areas[0];
 ts1.timeDefines.forEach((td, i) => {
+if (typeof td!== 'string') return;
 temps.set(td.slice(0, 10), {
 min: toNum(area.tempsMin && area.tempsMin[i]),
 max: toNum(area.tempsMax && area.tempsMax[i]),
@@ -257,7 +292,8 @@ const daily = new Map();
 const hourly = new Map();
 if (!om) return { daily, hourly};
 const d = om.daily || {};
-(d.time || []).forEach((date, i) => {
+(Array.isArray(d.time)? d.time: []).forEach((date, i) => {
+if (typeof date!== 'string') return;
 daily.set(date, {
 code: d.weather_code? d.weather_code[i]: null,
 max: roundOrNull(d.temperature_2m_max && d.temperature_2m_max[i]),
@@ -267,7 +303,8 @@ precipSum: d.precipitation_sum? toNum(d.precipitation_sum[i]): null,
 });
 });
 const h = om.hourly || {};
-(h.time || []).forEach((t, i) => {
+(Array.isArray(h.time)? h.time: []).forEach((t, i) => {
+if (typeof t!== 'string') return;
 const date = t.slice(0, 10);
 if (!hourly.has(date)) hourly.set(date, []);
 hourly.get(date).push({
@@ -289,7 +326,8 @@ const shortWeather = parseShortWeather(shortReport);
 const shortPops = parseShortPops(shortReport);
 const weekly = parseWeekly(weeklyReport);
 const om = parseOpenMeteo(openMeteo);
-const reportDatetime = shortReport.reportDatetime || weeklyReport.reportDatetime || '';
+const reportDatetimeRaw = shortReport.reportDatetime || weeklyReport.reportDatetime || '';
+const reportDatetime = typeof reportDatetimeRaw === 'string'? reportDatetimeRaw: '';
 
 const summaries = [];
 for (let i = 0; i < days; i++) {
