@@ -198,14 +198,6 @@ return n === null? null: Math.round(n);
 
 // --- JMA parsing ---
 
-const findArea = (timeSeries, areaCode) => {
-for (const ts of timeSeries || []) {
-const area = (ts.areas || []).find((a) => a.area && a.area.code === areaCode);
-if (area) return { ts, area};
-}
-return { ts: null, area: null};
-};
-
 // Returns Map<dateKey, {code, text, wind}> from the short-term report.
 const parseShortWeather = (report) => {
 const map = new Map();
