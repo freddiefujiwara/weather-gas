@@ -21,6 +21,19 @@
 // The calendar ID is deliberately NOT hardcoded: this repository is
 // public, and the ID belongs in script properties (same convention as
 // the other *-gas projects).
+//
+// Weather RSS (for the owner's own reader), following the calendar-gas
+// pattern:
+//   GET ?action=rss&token=<RSS_TOKEN>
+//     -> RSS 2.0 with this calendar's all-day forecast events, from
+//        today (Asia/Tokyo) through the next 7 days, in date order.
+// The feed carries the same titles and descriptions the sync wrote to
+// the calendar, so it is guarded by its own RSS_TOKEN script property
+// and refuses every request while the property is unset or the token
+// mismatches (fail closed). Serving the feed needs a Web app
+// deployment (see appsscript.json "webapp").
+// Run setup() once from the editor: it generates RSS_TOKEN (only when
+// unset) and logs so it can be copied from Project Settings.
 
 const JMA_FORECAST_URL =
 'https://www.jma.go.jp/bosai/forecast/data/forecast/110000.json';
@@ -462,6 +475,113 @@ calendar.createAllDayEvent(title, dateFromKey(date), { description});
 Logger.log(`Synced ${summaries.length} days (${summaries[0].date}.. ${summaries[summaries.length - 1].date})`);
 return summaries.length;
 };
+
+// --- Weather RSS ---
+
+const RSS_CHANNEL_ = {
+title: '天気（川口）',
+link: 'https://www.jma.go.jp/bosai/forecast/',
+description: '川口市の天気予報（当日〜7日分、気象庁／Open-Meteo）',
+};
+
+export function doGet(e) {
+const params = (e && e.parameter) || {};
+if (params.action === 'rss') {
+return serveRss_(params);
+}
+return createJsonResponse_({ ok: false, error: 'Unknown action.' });
+}
+
+// Serves action=rss. The token check comes first and fails closed:
+// an unset RSS_TOKEN refuses every request, and a mismatch answers
+// a JSON refusal — never the feed.
+const serveRss_ = (params) => {
+const expected = PropertiesService.getScriptProperties().getProperty('RSS_TOKEN');
+if (!expected || typeof params.token!== 'string' || params.token!== expected) {
+return createJsonResponse_({ ok: false, error: 'Unauthorized.' });
+}
+const calendarId = PropertiesService.getScriptProperties().getProperty('CALENDAR_ID');
+if (!calendarId) {
+return createJsonResponse_({ ok: false, error: 'Not configured.' });
+}
+const calendar = CalendarApp.getCalendarById(calendarId);
+if (!calendar) {
+return createJsonResponse_({ ok: false, error: 'Not configured.' });
+}
+const todayKey = todayKeyJst();
+const start = dateFromKey(todayKey);
+const end = dateFromKey(addDaysToKey(todayKey, DAYS_TO_SYNC));
+const items = calendar
+.getEvents(start, end)
+.map((ev) => normalizeFeedEvent_(ev))
+.filter((item) => item!== null)
+.sort((a, b) => (a.date < b.date? -1: a.date > b.date? 1: 0));
+return createXmlResponse_(buildRss_(items));
+};
+
+// Keeps only all-day events (the forecast events are all-day; a timed
+// event on this dedicated calendar is not a forecast day). Returns
+// null for anything that is not a usable forecast item.
+const normalizeFeedEvent_ = (ev) => {
+if (typeof ev.isAllDayEvent === 'function' && !ev.isAllDayEvent()) return null;
+if (typeof ev.getStartTime!== 'function') return null;
+const start = ev.getStartTime();
+if (!(start instanceof Date) || Number.isNaN(start.getTime())) return null;
+return {
+date: dateKeyFromMs(start.getTime()),
+title: typeof ev.getTitle === 'function'? ev.getTitle(): '',
+description: typeof ev.getDescription === 'function'? ev.getDescription(): '',
+};
+};
+
+export function buildRss_(items) {
+const lines = [
+'<?xml version="1.0" encoding="UTF-8"?>',
+'<rss version="2.0">',
+'<channel>',
+'<title>' + escapeXml_(RSS_CHANNEL_.title) + '</title>',
+'<link>' + escapeXml_(RSS_CHANNEL_.link) + '</link>',
+'<description>' + escapeXml_(RSS_CHANNEL_.description) + '</description>',
+];
+for (const item of items || []) {
+lines.push(
+'<item>',
+'<title>' + escapeXml_(item.title || '(no title)') + '</title>',
+'<link>' + escapeXml_(RSS_CHANNEL_.link) + '</link>',
+'<guid isPermaLink="false">' + escapeXml_(`weather-${item.date}`) + '</guid>',
+'<pubDate>' + dateFromKey(item.date).toUTCString() + '</pubDate>',
+'<description>' + escapeXml_(item.description || '') + '</description>',
+'</item>'
+);
+}
+lines.push('</channel>', '</rss>');
+return lines.join('\n');
+}
+
+const escapeXml_ = (text) => {
+return String(text)
+.replace(/&/g, '&amp;')
+.replace(/</g, '&lt;')
+.replace(/>/g, '&gt;')
+.replace(/"/g, '&quot;')
+.replace(/'/g, '&apos;');
+};
+
+const createXmlResponse_ = (xml) => {
+return ContentService.createTextOutput(xml).setMimeType(ContentService.MimeType.XML);
+};
+
+const createJsonResponse_ = (obj) => {
+return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+};
+
+export function setup() {
+const props = PropertiesService.getScriptProperties();
+if (!props.getProperty('RSS_TOKEN')) {
+props.setProperty('RSS_TOKEN', Utilities.getUuid() + Utilities.getUuid());
+}
+console.log('RSS_TOKEN has been set. Copy it from Project Settings > Script Properties.');
+}
 
 export const installTrigger = () => {
 ScriptApp.getProjectTriggers()
