@@ -34,6 +34,32 @@ next 7 days — so the forecast sits right next to the day's schedule.
    17:00 JST).
 4. Run `syncWeatherCalendar()` once for the first sync.
 
+## Weather RSS
+
+The same forecast is also served as an RSS 2.0 feed (for the owner's
+own reader), following the calendar-gas pattern. The feed reads only
+this project's own calendar (`CALENDAR_ID`) and returns one item per
+day — today (Asia/Tokyo) through the next 7 days, in date order — with
+the calendar event's title, its description, a `weather-YYYY-MM-DD`
+guid and the day's date as `pubDate`.
+
+```
+GET <web app URL>?action=rss&token=<RSS_TOKEN>
+```
+
+- The feed is guarded by the dedicated `RSS_TOKEN` script property
+  and fails closed: while the property is unset, or when the token
+  does not match, every request is refused with a JSON error.
+- Run `setup()` once in the Apps Script editor to generate
+  `RSS_TOKEN` (it is only created when unset). Copy the value from
+  Project Settings → Script Properties.
+- Serving the feed requires a Web app deployment. `appsscript.json`
+  declares `"webapp": {"access": "ANYONE_ANONYMOUS", "executeAs":
+  "USER_DEPLOYING"}`; the token in the URL is what actually guards
+  the feed. After the first Web app deployment, pin the deployment
+  in the `DEPLOYMENT_ID` / `STAGING_DEPLOYMENT_ID` GitHub secrets so
+  CI keeps updating the same deployment (and the same `/exec` URL).
+
 ## Operations
 
 - The sync deletes the target calendar's events for the next 7 days and

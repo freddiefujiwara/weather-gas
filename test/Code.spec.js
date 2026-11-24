@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 import {
 buildDaySummaries,
+buildRss_,
+doGet,
 getCalendarId,
+setup,
 syncWeatherCalendar,
 weatherCodeInfo,
 } from "../src/Code.js";
@@ -177,6 +180,18 @@ getProperty: (key) => (key === "CALENDAR_ID"? "test-calendar-id": null),
 }),
 };
 global.Logger = { log: vi.fn()};
+global.ContentService = {
+MimeType: { XML: "text/xml", JSON: "application/json"},
+createTextOutput: vi.fn((content) => ({
+content,
+mimeType: null,
+setMimeType(mime) {
+this.mimeType = mime;
+return this;
+},
+})),
+};
+global.Utilities = { getUuid: vi.fn(() => "uuid-part")};
 });
 
 describe("getCalendarId", () => {
@@ -228,5 +243,134 @@ getContentText: () => JSON.stringify(jmaFixture),
 });
 expect(syncWeatherCalendar()).toBe(7);
 expect(mockCalendar.createAllDayEvent).toHaveBeenCalledTimes(7);
+});
+});
+
+describe("buildRss_", () => {
+it("renders the channel and one item per day", () => {
+const xml = buildRss_([
+{
+date: "2026-11-24",
+title: "🌥️ くもり 20°/8° 💧10%",
+description: "[気象庁：埼玉県南部]\n天気：くもり",
+},
+]);
+expect(xml).toContain("<title>天気（川口）</title>");
+expect(xml).toContain("<title>🌥️ くもり 20°/8° 💧10%</title>");
+expect(xml).toContain("[気象庁：埼玉県南部]\n天気：くもり");
+expect(xml).toContain('<guid isPermaLink="false">weather-2026-11-24</guid>');
+// pubDate is the day's JST midnight in RFC 822 (GMT) form.
+expect(xml).toContain("<pubDate>Mon, 23 Nov 2026 15:00:00 GMT</pubDate>");
+expect(xml).toContain("<link>https://www.jma.go.jp/bosai/forecast/</link>");
+});
+
+it("escapes XML special characters in titles and descriptions", () => {
+const xml = buildRss_([
+{ date: "2026-11-24", title: `a & b <c> "d" 'e'`, description: "x < y & z > w"},
+]);
+expect(xml).toContain("a &amp; b &lt;c&gt; &quot;d&quot; &apos;e&apos;");
+expect(xml).toContain("x &lt; y &amp; z &gt; w");
+expect(xml).not.toContain("a & b");
+});
+
+it("renders a valid feed with no items", () => {
+const xml = buildRss_([]);
+expect(xml).toContain("<channel>");
+expect(xml).not.toContain("<item>");
+expect(xml.trim().endsWith("</rss>")).toBe(true);
+});
+});
+
+// --- RSS serving (doGet) ---
+
+const rssStore = { CALENDAR_ID: "test-calendar-id", RSS_TOKEN: "test-rss-token"};
+
+const setRssProperties = (store) => {
+global.PropertiesService = {
+getScriptProperties: () => ({
+getProperty: (key) => (key in store? store[key]: null),
+setProperty: (key, value) => {
+store[key] = value;
+},
+}),
+};
+};
+
+const allDayEvent = (dateKey, title, description) => ({
+getTitle: () => title,
+getDescription: () => description,
+getStartTime: () => new Date(`${dateKey}T00:00:00+09:00`),
+isAllDayEvent: () => true,
+});
+
+describe("doGet RSS", () => {
+beforeEach(() => {
+vi.useFakeTimers();
+vi.setSystemTime(new Date("2026-11-24T06:00:00+09:00"));
+setRssProperties({ ...rssStore});
+});
+afterEach(() => {
+vi.useRealTimers();
+});
+
+it("rejects non-rss actions with a JSON error", () => {
+const res = doGet({ parameter: { action: "other"}});
+expect(res.mimeType).toBe("application/json");
+expect(JSON.parse(res.content)).toEqual({ ok: false, error: "Unknown action."});
+const bare = doGet({});
+expect(JSON.parse(bare.content).ok).toBe(false);
+});
+
+it("fails closed when RSS_TOKEN is unset, even with a token supplied", () => {
+setRssProperties({ CALENDAR_ID: "test-calendar-id"});
+const res = doGet({ parameter: { action: "rss", token: "anything"}});
+expect(res.mimeType).toBe("application/json");
+expect(JSON.parse(res.content)).toEqual({ ok: false, error: "Unauthorized."});
+});
+
+it("rejects a mismatched or missing token", () => {
+expect(JSON.parse(doGet({ parameter: { action: "rss", token: "wrong"}}).content).error).toBe("Unauthorized.");
+expect(JSON.parse(doGet({ parameter: { action: "rss"}}).content).error).toBe("Unauthorized.");
+});
+
+it("reports Not configured when CALENDAR_ID is missing", () => {
+setRssProperties({ RSS_TOKEN: "test-rss-token"});
+const res = doGet({ parameter: { action: "rss", token: "test-rss-token"}});
+expect(JSON.parse(res.content)).toEqual({ ok: false, error: "Not configured."});
+});
+
+it("serves the week's all-day events in date order", () => {
+mockCalendar.getEvents.mockReturnValue([
+allDayEvent("2026-11-25", "☀️ 晴れ 21°/9° 💧0%", "明日の説明"),
+allDayEvent("2026-11-24", "🌥️ くもり 20°/8° 💧10%", "今日の説明"),
+{ // timed events are not forecast days and are dropped
+getTitle: () => "timed",
+getDescription: () => "nope",
+getStartTime: () => new Date("2026-11-24T10:00:00+09:00"),
+isAllDayEvent: () => false,
+},
+]);
+const res = doGet({ parameter: { action: "rss", token: "test-rss-token"}});
+expect(res.mimeType).toBe("text/xml");
+expect(res.content).toContain("weather-2026-11-24");
+expect(res.content).toContain("weather-2026-11-25");
+expect(res.content.indexOf("weather-2026-11-24")).toBeLessThan(
+res.content.indexOf("weather-2026-11-25")
+);
+expect(res.content).toContain("今日の説明");
+expect(res.content).not.toContain("timed");
+});
+});
+
+describe("setup", () => {
+it("generates RSS_TOKEN only when unset", () => {
+const store = {};
+setRssProperties(store);
+vi.spyOn(console, "log").mockImplementation(() => {});
+setup();
+expect(store.RSS_TOKEN).toBe("uuid-partuuid-part");
+setup();
+expect(store.RSS_TOKEN).toBe("uuid-partuuid-part");
+expect(global.Utilities.getUuid).toHaveBeenCalledTimes(2);
 });
 });
