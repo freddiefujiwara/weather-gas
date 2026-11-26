@@ -259,7 +259,7 @@ describe("one deformed entry must not kill the whole forecast", () => {
   });
 
   it("still syncs 7 days when the Open-Meteo payload is deformed", () => {
-    const mockCalendar = { getEvents: vi.fn().mockReturnValue([]), createAllDayEvent: vi.fn() };
+    const mockCalendar = { getEvents: vi.fn().mockReturnValue([]), createAllDayEvent: vi.fn(() => ({ setTransparency: vi.fn() })) };
     global.UrlFetchApp = {
       fetch: vi.fn((url) => ({
         getResponseCode: () => 200,
@@ -271,7 +271,7 @@ describe("one deformed entry must not kill the whole forecast", () => {
           ),
       })),
     };
-    global.CalendarApp = { getCalendarById: vi.fn().mockReturnValue(mockCalendar) };
+    global.CalendarApp = { EventTransparency: { TRANSPARENT: "transparent" }, getCalendarById: vi.fn().mockReturnValue(mockCalendar) };
     global.PropertiesService = {
       getScriptProperties: () => ({ getProperty: () => "test-calendar-id" }),
     };

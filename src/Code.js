@@ -1,12 +1,14 @@
 // weather-gas: syncs a detailed weather forecast into a dedicated
 // Google Calendar ("天気（川口）") as all-day events, one per day for the
-// next 7 days.
+// next 7 days. Events are created as "free" (transparent) so a forecast
+// never blocks the day.
 //
 // Data sources (both fetched at runtime, nothing secret is stored here):
 // - Japan Meteorological Agency (JMA) official forecast JSON for Saitama
 // (https://www.jma.go.jp/bosai/forecast/data/forecast/110000.json).
 // Short-term report: weather text / wind / 6-hour precipitation
-// probabilities for today and tomorrow (area 埼玉県南部 = 110010).
+// probabilities for today and tomorrow (area 埼玉県南部 = 110010), plus
+// tomorrow's min/max temperatures (point: 熊谷).
 // Weekly report: weather codes, daily precipitation probability,
 // reliability and temperature ranges (point: 熊谷) for the days after.
 // - Open-Meteo (free, no key) pinpoint forecast for Kawaguchi City:
@@ -255,6 +257,46 @@ map.get(startKey).push({ label, pop});
 return map;
 };
 
+// Short-term report temperatures (point: 熊谷). The series holds one
+// entry per day tagged 00:00 (that day's minimum) and one tagged 09:00
+// (that day's maximum) for today and tomorrow. Callers use only
+// tomorrow's pair: in the live response checked on 2026-11-27, today's
+// two entries both carried the maximum (17 and 17 against an observed
+// morning low near 7), so today's pair cannot be trusted, while
+// tomorrow's pair (8 / 17) matched the weekly report exactly.
+// Returns Map<dateKey, {min, max}> covering every date in the series.
+const parseShortTemps = (report) => {
+const map = new Map();
+const series = Array.isArray(report.timeSeries)? report.timeSeries: [];
+let ts = null;
+let area = null;
+for (const candidate of series) {
+if (!candidate) continue;
+const areas = Array.isArray(candidate.areas)? candidate.areas: [];
+const found =
+areas.find((a) => a && a.area && a.area.code === '43056' && Array.isArray(a.temps)) ||
+areas.find((a) => a && Array.isArray(a.temps));
+if (found) {
+ts = candidate;
+area = found;
+break;
+}
+}
+if (!ts || !area) return map;
+if (!Array.isArray(ts.timeDefines)) return map;
+ts.timeDefines.forEach((td, i) => {
+if (typeof td!== 'string') return;
+const hour = td.slice(11, 13);
+if (hour!== '00' && hour!== '09') return;
+const date = td.slice(0, 10);
+if (!map.has(date)) map.set(date, { min: null, max: null});
+const entry = map.get(date);
+if (hour === '00') entry.min = toNum(area.temps[i]);
+else entry.max = toNum(area.temps[i]);
+});
+return map;
+};
+
 // Weekly report: Map<dateKey, {code, pop, reliability}> and
 // Map<dateKey, {min, max, minLower, minUpper, maxLower, maxUpper}> (熊谷).
 const parseWeekly = (report) => {
@@ -329,6 +371,7 @@ const shortReport = (jma || [])[0] || {};
 const weeklyReport = (jma || [])[1] || {};
 const shortWeather = parseShortWeather(shortReport);
 const shortPops = parseShortPops(shortReport);
+const shortTemps = parseShortTemps(shortReport);
 const weekly = parseWeekly(weeklyReport);
 const om = parseOpenMeteo(openMeteo);
 const reportDatetimeRaw = shortReport.reportDatetime || weeklyReport.reportDatetime || '';
@@ -340,6 +383,9 @@ const date = addDaysToKey(todayKey, i);
 const sw = shortWeather.get(date);
 const wk = weekly.weather.get(date);
 const wt = weekly.temps.get(date);
+// Short-term temperatures are only trusted for tomorrow: today's pair
+// in that series does not carry a usable minimum (see parseShortTemps).
+const st = date > todayKey? shortTemps.get(date): null;
 const omDay = om.daily.get(date);
 
 let info;
@@ -371,6 +417,8 @@ maxPop = omDay.popMax;
 
 let maxTemp = omDay? omDay.max: null;
 let minTemp = omDay? omDay.min: null;
+if (maxTemp === null && st) maxTemp = st.max;
+if (minTemp === null && st) minTemp = st.min;
 if (maxTemp === null && wt) maxTemp = wt.max;
 if (minTemp === null && wt) minTemp = wt.min;
 
@@ -399,6 +447,10 @@ const range = (lo, hi) =>
 lo!== null && hi!== null && (lo!== hi)? `（${lo}〜${hi}℃）`: '';
 lines.push(
 `気温（熊谷）：最低 ${wt.min === null? '—': wt.min + '℃'}${range(wt.minLower, wt.minUpper)} / 最高 ${wt.max === null? '—': wt.max + '℃'}${range(wt.maxLower, wt.maxUpper)}`
+);
+} else if (st && (st.min!== null || st.max!== null)) {
+lines.push(
+`気温（熊谷）：最低 ${st.min === null? '—': st.min + '℃'} / 最高 ${st.max === null? '—': st.max + '℃'}`
 );
 }
 const hours = (om.hourly.get(date) || []).filter((r) => r.hour % 3 === 0);
@@ -462,7 +514,10 @@ const start = dateFromKey(todayKey);
 const end = dateFromKey(addDaysToKey(todayKey, DAYS_TO_SYNC));
 calendar.getEvents(start, end).forEach((event) => event.deleteEvent());
 summaries.forEach(({ date, title, description}) => {
-calendar.createAllDayEvent(title, dateFromKey(date), { description});
+const event = calendar.createAllDayEvent(title, dateFromKey(date), { description});
+// A forecast is information, not a commitment: show the day as free
+// so the event never blocks scheduling.
+event.setTransparency(CalendarApp.EventTransparency.TRANSPARENT);
 });
 Logger.log(`Synced ${summaries.length} days (${summaries[0].date}.. ${summaries[summaries.length - 1].date})`);
 return summaries.length;
