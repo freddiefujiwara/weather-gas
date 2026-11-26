@@ -153,14 +153,37 @@ expect(jmaOnly[0].description).not.toContain("時間ごと");
 expect(jmaOnly[0].title).toBe("🌥️ くもり 昼前 から 晴れ 💧10%");
 expect(jmaOnly[2].title).toContain("20°/7°");
 });
+
+it("uses short-term temps for tomorrow when weekly temps have not started", () => {
+// Drop the first day (2026-11-14) from both weekly series, mirroring
+// an evening report whose weekly temperatures start a day later.
+// Tomorrow must then fall back to the short-term temperatures
+// (fixture point: min 8 / max 21) instead of showing no temperature.
+const jmaShifted = JSON.parse(JSON.stringify(jmaFixture));
+jmaShifted[1].timeSeries.forEach((ts) => {
+ts.timeDefines = ts.timeDefines.slice(1);
+ts.areas.forEach((a) => {
+Object.keys(a).forEach((k) => {
+if (Array.isArray(a[k])) a[k] = a[k].slice(1);
+});
+});
+});
+const shifted = buildDaySummaries({ jma: jmaShifted, openMeteo: null, todayKey: "2026-11-13"});
+expect(shifted[1].date).toBe("2026-11-14");
+expect(shifted[1].title).toBe("⛅ 晴れ のち くもり 21°/8° 💧10%");
+expect(shifted[1].description).toContain("気温（熊谷）：最低 8℃ / 最高 21℃");
+// Today's short-term pair is never used (see parseShortTemps).
+expect(shifted[0].title).toBe("🌥️ くもり 昼前 から 晴れ 💧10%");
+});
 });
 
 // --- GAS runtime mocks ---
 
 const mockExistingEvent = { deleteEvent: vi.fn()};
+const mockCreatedEvent = { setTransparency: vi.fn()};
 const mockCalendar = {
 getEvents: vi.fn().mockReturnValue([mockExistingEvent]),
-createAllDayEvent: vi.fn(),
+createAllDayEvent: vi.fn(() => mockCreatedEvent),
 };
 
 beforeEach(() => {
@@ -173,7 +196,10 @@ getContentText: () =>
 JSON.stringify(url.includes("jma.go.jp")? jmaFixture: openMeteoFixture),
 })),
 };
-global.CalendarApp = { getCalendarById: vi.fn().mockReturnValue(mockCalendar)};
+global.CalendarApp = {
+EventTransparency: { TRANSPARENT: "transparent"},
+getCalendarById: vi.fn().mockReturnValue(mockCalendar),
+};
 global.PropertiesService = {
 getScriptProperties: () => ({
 getProperty: (key) => (key === "CALENDAR_ID"? "test-calendar-id": null),
@@ -227,6 +253,8 @@ const count = syncWeatherCalendar();
 expect(count).toBe(7);
 expect(mockExistingEvent.deleteEvent).toHaveBeenCalledTimes(1);
 expect(mockCalendar.createAllDayEvent).toHaveBeenCalledTimes(7);
+expect(mockCreatedEvent.setTransparency).toHaveBeenCalledTimes(7);
+expect(mockCreatedEvent.setTransparency).toHaveBeenCalledWith("transparent");
 const [title, date, options] = mockCalendar.createAllDayEvent.mock.calls[0];
 expect(title).toContain("くもり");
 expect(date).toBeInstanceOf(Date);
